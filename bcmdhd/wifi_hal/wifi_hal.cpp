@@ -1,3 +1,21 @@
+/*
+ * Copyright (C) 2017 The Android Open Source Project
+ *
+ * Portions copyright (C) 2017 Broadcom Limited
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <stdint.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -149,6 +167,8 @@ wifi_error init_wifi_vendor_hal_func_table(wifi_hal_fn *fn)
     fn->wifi_reset_significant_change_handler = wifi_reset_significant_change_handler;
     fn->wifi_get_gscan_capabilities = wifi_get_gscan_capabilities;
     fn->wifi_get_link_stats = wifi_get_link_stats;
+    fn->wifi_set_link_stats = wifi_set_link_stats;
+    fn->wifi_clear_link_stats = wifi_clear_link_stats;
     fn->wifi_get_valid_channels = wifi_get_valid_channels;
     fn->wifi_rtt_range_request = wifi_rtt_range_request;
     fn->wifi_rtt_range_cancel = wifi_rtt_range_cancel;
@@ -259,14 +279,28 @@ wifi_error wifi_initialize(wifi_handle *handle)
 
     *handle = (wifi_handle) info;
 
-    wifi_add_membership(*handle, "scan");
-    wifi_add_membership(*handle, "mlme");
-    wifi_add_membership(*handle, "regulatory");
-    wifi_add_membership(*handle, "vendor");
+    if (wifi_init_interfaces(*handle) != WIFI_SUCCESS) {
+        ALOGE("No wifi interface found");
+        nl_socket_free(cmd_sock);
+        nl_socket_free(event_sock);
+        pthread_mutex_destroy(&info->cb_lock);
+        free(info);
+        return WIFI_ERROR_NOT_AVAILABLE;
+    }
 
-    wifi_init_interfaces(*handle);
+    if ((wifi_add_membership(*handle, "scan") < 0) ||
+        (wifi_add_membership(*handle, "mlme")  < 0) ||
+        (wifi_add_membership(*handle, "regulatory") < 0) ||
+        (wifi_add_membership(*handle, "vendor") < 0)) {
+        ALOGE("Add membership failed");
+        nl_socket_free(cmd_sock);
+        nl_socket_free(event_sock);
+        pthread_mutex_destroy(&info->cb_lock);
+        free(info);
+        return WIFI_ERROR_NOT_AVAILABLE;
+    }
+
     // ALOGI("Found %d interfaces", info->num_interfaces);
-
 
     ALOGI("Initialized Wifi HAL Successfully; vendor cmd = %d", NL80211_CMD_VENDOR);
     return WIFI_SUCCESS;
@@ -318,7 +352,7 @@ void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
     char buf[64];
 
     info->cleaned_up_handler = handler;
-    if (write(info->cleanup_socks[0], "Exit", 4) < 1) {
+    if (TEMP_FAILURE_RETRY(write(info->cleanup_socks[0], "Exit", 4)) < 1) {
         // As a fallback set the cleanup flag to TRUE
         ALOGE("could not write to the cleanup socket");
     } else {
@@ -328,8 +362,9 @@ void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
         // it has rx'ed the Exit message to exit the thread.
         // As a fallback set the cleanup flag to TRUE
         memset(buf, 0, sizeof(buf));
-        int result = read(info->cleanup_socks[0], buf, sizeof(buf));
-        ALOGE("%s: Read after POLL returned %d, error no = %d", __FUNCTION__, result, errno);
+        ssize_t result = TEMP_FAILURE_RETRY(read(info->cleanup_socks[0], buf, sizeof(buf)));
+        ALOGE("%s: Read after POLL returned %zd, error no = %d (%s)", __FUNCTION__,
+               result, errno, strerror(errno));
         if (strncmp(buf, "Done", 4) == 0) {
             ALOGE("Event processing terminated");
         } else {
@@ -410,13 +445,14 @@ void wifi_event_loop(wifi_handle handle)
         pfd[0].revents = 0;
         pfd[1].revents = 0;
         // ALOGI("Polling socket");
-        int result = poll(pfd, 2, timeout);
+        int result = TEMP_FAILURE_RETRY(poll(pfd, 2, timeout));
         if (result < 0) {
             // ALOGE("Error polling socket");
         } else if (pfd[0].revents & POLLERR) {
-            ALOGE("POLL Error; error no = %d", errno);
-            int result2 = read(pfd[0].fd, buf, sizeof(buf));
-            ALOGE("Read after POLL returned %d, error no = %d", result2, errno);
+            ALOGE("POLL Error; error no = %d (%s)", errno, strerror(errno));
+            ssize_t result2 = TEMP_FAILURE_RETRY(read(pfd[0].fd, buf, sizeof(buf)));
+            ALOGE("Read after POLL returned %zd, error no = %d (%s)", result2,
+                  errno, strerror(errno));
         } else if (pfd[0].revents & POLLHUP) {
             ALOGE("Remote side hung up");
             break;
@@ -425,11 +461,12 @@ void wifi_event_loop(wifi_handle handle)
             internal_pollin_handler(handle);
         } else if (pfd[1].revents & POLLIN) {
             memset(buf, 0, sizeof(buf));
-            int result2 = read(pfd[1].fd, buf, sizeof(buf));
-            ALOGE("%s: Read after POLL returned %d, error no = %d", __FUNCTION__, result2, errno);
+            ssize_t result2 = TEMP_FAILURE_RETRY(read(pfd[1].fd, buf, sizeof(buf)));
+            ALOGE("%s: Read after POLL returned %zd, error no = %d (%s)", __FUNCTION__,
+                   result2, errno, strerror(errno));
             if (strncmp(buf, "Exit", 4) == 0) {
                 ALOGD("Got a signal to exit!!!");
-                if (write(pfd[1].fd, "Done", 4) < 1) {
+                if (TEMP_FAILURE_RETRY(write(pfd[1].fd, "Done", 4)) < 1) {
                     ALOGE("could not write to the cleanup socket");
                 }
                 break;
@@ -1137,6 +1174,9 @@ wifi_error wifi_init_interfaces(wifi_handle handle)
     }
 
     closedir(d);
+
+    if (n == 0)
+        return WIFI_ERROR_NOT_AVAILABLE;
 
     d = opendir("/sys/class/net");
     if (d == 0)
