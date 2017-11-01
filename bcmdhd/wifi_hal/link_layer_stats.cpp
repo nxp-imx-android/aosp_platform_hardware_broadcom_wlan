@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2017 The Android Open Source Project
+ *
+ * Portions copyright (C) 2017 Broadcom Limited
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 #include <stdint.h>
 #include <fcntl.h>
@@ -150,3 +167,17 @@ wifi_error wifi_get_link_stats(wifi_request_id id,
     return (wifi_error) command.requestResponse();
 }
 
+wifi_error wifi_set_link_stats(
+        wifi_interface_handle /* iface */, wifi_link_layer_params /* params */)
+{
+    /* Return success here since bcom HAL does not need set link stats. */
+    return WIFI_SUCCESS;
+}
+
+wifi_error wifi_clear_link_stats(
+        wifi_interface_handle /* iface */, u32 /* stats_clear_req_mask */,
+        u32 * /* stats_clear_rsp_mask */, u8 /* stop_req */, u8 * /* stop_rsp */)
+{
+    /* Return success here since bcom HAL does not support clear link stats. */
+    return WIFI_SUCCESS;
+}
