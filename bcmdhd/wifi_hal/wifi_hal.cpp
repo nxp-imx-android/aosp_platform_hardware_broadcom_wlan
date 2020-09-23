@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2017 The Android Open Source Project
  *
- * Portions copyright (C) 2017 Broadcom Limited
+ * Portions copyright (C) 2019 Broadcom Limited
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -97,14 +97,19 @@ typedef enum wifi_attr {
     ANDR_WIFI_ATTRIBUTE_TCPACK_SUP_VALUE,
     ANDR_WIFI_ATTRIBUTE_LATENCY_MODE,
     ANDR_WIFI_ATTRIBUTE_RANDOM_MAC,
-    ANDR_WIFI_ATTRIBUTE_TX_POWER_SCENARIO
+    ANDR_WIFI_ATTRIBUTE_TX_POWER_SCENARIO,
+    ANDR_WIFI_ATTRIBUTE_THERMAL_MITIGATION,
+    ANDR_WIFI_ATTRIBUTE_THERMAL_COMPLETION_WINDOW
     // Add more attribute here
 } wifi_attr_t;
 
 enum wifi_rssi_monitor_attr {
-    RSSI_MONITOR_ATTRIBUTE_MAX_RSSI,
-    RSSI_MONITOR_ATTRIBUTE_MIN_RSSI,
-    RSSI_MONITOR_ATTRIBUTE_START,
+    RSSI_MONITOR_ATTRIBUTE_INVALID	= 0,
+    RSSI_MONITOR_ATTRIBUTE_MAX_RSSI	= 1,
+    RSSI_MONITOR_ATTRIBUTE_MIN_RSSI	= 2,
+    RSSI_MONITOR_ATTRIBUTE_START	= 3,
+    // Add more attribute here
+    RSSI_MONITOR_ATTRIBUTE_MAX
 };
 
 enum wifi_apf_attr {
@@ -117,6 +122,20 @@ enum wifi_apf_attr {
 enum apf_request_type {
     GET_APF_CAPABILITIES,
     SET_APF_PROGRAM
+};
+
+enum wifi_dscp_attr {
+    DSCP_ATTRIBUTE_INVALID = 0,
+    DSCP_ATTRIBUTE_START = 1,
+    DSCP_ATTRIBUTE_END = 2,
+    DSCP_ATTRIBUTE_AC = 3,
+    /* Add more attributes here */
+    DSCP_ATTRIBUTE_MAX
+};
+
+enum wifi_dscp_request_type {
+    SET_DSCP_TABLE,
+    RESET_DSCP_TABLE
 };
 
 /* Initialize/Cleanup */
@@ -248,6 +267,9 @@ wifi_error init_wifi_vendor_hal_func_table(wifi_hal_fn *fn)
     fn->wifi_select_tx_power_scenario = wifi_select_tx_power_scenario;
     fn->wifi_reset_tx_power_scenario = wifi_reset_tx_power_scenario;
     fn->wifi_set_subsystem_restart_handler = wifi_set_subsystem_restart_handler;
+    fn->wifi_set_thermal_mitigation_mode = wifi_set_thermal_mitigation_mode;
+    fn->wifi_map_dscp_access_category = wifi_map_dscp_access_category;
+    fn->wifi_reset_dscp_mapping = wifi_reset_dscp_mapping;
 
     return WIFI_SUCCESS;
 }
@@ -1688,6 +1710,245 @@ wifi_error wifi_reset_tx_power_scenario(wifi_interface_handle handle)
     ALOGE("wifi_reset_tx_power_scenario");
     TxPowerScenario command(handle);
     return (wifi_error)command.start(scenario);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+
+class ThermalMitigation : public WifiCommand {
+private:
+    wifi_thermal_mode mMitigation;
+    u32 mCompletionWindow;
+public:
+    // constructor for thermal mitigation setting
+    ThermalMitigation(wifi_interface_handle handle,
+		    wifi_thermal_mode mitigation, u32 completion_window)
+    : WifiCommand("ThermalMitigation", handle, 0)
+    {
+        mMitigation = mitigation;
+		mCompletionWindow = completion_window;
+    }
+
+    int createRequest(WifiRequest& request, int subcmd,
+		    wifi_thermal_mode mitigation, u32 completion_window) {
+        int result = request.create(GOOGLE_OUI, subcmd);
+        if (result < 0) {
+            return result;
+        }
+
+        if ((mitigation < WIFI_MITIGATION_NONE) ||
+           (mitigation > WIFI_MITIGATION_EMERGENCY)) {
+            ALOGE("Unsupported tx mitigation value:%d\n", mitigation);
+            return WIFI_ERROR_NOT_SUPPORTED;
+        }
+
+        nlattr *data = request.attr_start(NL80211_ATTR_VENDOR_DATA);
+        result = request.put_s8(ANDR_WIFI_ATTRIBUTE_THERMAL_MITIGATION, mitigation);
+        if (result < 0) {
+            ALOGE("Failed to put tx power scenario request; result = %d", result);
+            return result;
+        }
+        result = request.put_u32(ANDR_WIFI_ATTRIBUTE_THERMAL_COMPLETION_WINDOW,
+		       	completion_window);
+        if (result < 0) {
+            ALOGE("Failed to put tx power scenario request; result = %d", result);
+            return result;
+        }
+
+        request.attr_end(data);
+        return WIFI_SUCCESS;
+    }
+
+    int start() {
+        WifiRequest request(familyId(), ifaceId());
+        int result = createRequest(request, WIFI_SUBCMD_THERMAL_MITIGATION, mMitigation,
+		       	mCompletionWindow);
+        if (result != WIFI_SUCCESS) {
+            ALOGE("failed to create request; result = %d", result);
+            return result;
+        }
+
+        ALOGD("try to get resp; mitigation=%d, delay=%d", mMitigation, mCompletionWindow);
+        result = requestResponse(request);
+        if (result != WIFI_SUCCESS) {
+            ALOGE("failed to send thermal mitigation; result = %d", result);
+        }
+        return result;
+    }
+protected:
+    virtual int handleResponse(WifiEvent& reply) {
+        ALOGD("Request complete!");
+        /* Nothing to do on response! */
+        return NL_SKIP;
+    }
+};
+
+wifi_error wifi_set_thermal_mitigation_mode(wifi_handle handle,
+                                            wifi_thermal_mode mode,
+                                            u32 completion_window)
+{
+    int numIfaceHandles = 0;
+    wifi_interface_handle *ifaceHandles = NULL;
+    wifi_interface_handle wlan0Handle;
+
+    wlan0Handle = wifi_get_wlan_interface((wifi_handle)handle, ifaceHandles, numIfaceHandles);
+    ThermalMitigation command(wlan0Handle, mode, completion_window);
+    return (wifi_error)command.start();
+}
+
+/////////////////////////////////////////////////////////////////////////////
+class DscpCommand : public WifiCommand {
+    private:
+	u32 mStart;
+	u32 mEnd;
+	u32 mAc;
+        int mReqType;
+    public:
+        DscpCommand(wifi_interface_handle handle,
+                u32 start, u32 end, u32 ac)
+            : WifiCommand("DscpCommand", handle, 0),
+                    mStart(start), mEnd(end), mAc(ac),
+                    mReqType(SET_DSCP_TABLE)
+        {
+        }
+
+        DscpCommand(wifi_interface_handle handle)
+            : WifiCommand("DscpCommand", handle, 0),
+                    mReqType(RESET_DSCP_TABLE)
+        {
+        }
+
+    int createRequest(WifiRequest& request) {
+        if (mReqType == SET_DSCP_TABLE) {
+            ALOGI("\n%s: DSCP set table request\n", __FUNCTION__);
+            return createSetDscpRequest(request);
+        } else if (mReqType == RESET_DSCP_TABLE) {
+            ALOGI("\n%s: DSCP reset table request\n", __FUNCTION__);
+            return createResetDscpRequest(request);
+        } else {
+            ALOGE("\n%s Unknown DSCP request\n", __FUNCTION__);
+            return WIFI_ERROR_NOT_SUPPORTED;
+        }
+        return WIFI_SUCCESS;
+    }
+
+    int createSetDscpRequest(WifiRequest& request) {
+        int result = request.create(GOOGLE_OUI, DSCP_SUBCMD_SET_TABLE);
+        if (result < 0) {
+            return result;
+        }
+
+        nlattr *data = request.attr_start(NL80211_ATTR_VENDOR_DATA);
+        result = request.put_u32(DSCP_ATTRIBUTE_START, mStart);
+        if (result < 0) {
+            goto exit;
+        }
+        result = request.put_u32(DSCP_ATTRIBUTE_END, mEnd);
+        if (result < 0) {
+            goto exit;
+        }
+        result = request.put_u32(DSCP_ATTRIBUTE_AC, mAc);
+        if (result < 0) {
+            goto exit;
+        }
+        request.attr_end(data);
+exit:
+        return result;
+    }
+
+    int createResetDscpRequest(WifiRequest& request) {
+        int result = request.create(GOOGLE_OUI, DSCP_SUBCMD_RESET_TABLE);
+        if (result < 0) {
+            return result;
+        }
+
+        nlattr *data = request.attr_start(NL80211_ATTR_VENDOR_DATA);
+        request.attr_end(data);
+        return result;
+    }
+
+    int start() {
+        WifiRequest request(familyId(), ifaceId());
+        int result = createRequest(request);
+        if (result < 0) {
+            return result;
+        }
+        result = requestResponse(request);
+        if (result < 0) {
+            ALOGI("Request Response failed for DSCP, result = %d", result);
+            return result;
+        }
+        return result;
+    }
+
+    int handleResponse(WifiEvent& reply) {
+        ALOGD("In DscpCommand::handleResponse");
+
+        if (reply.get_cmd() != NL80211_CMD_VENDOR) {
+            ALOGD("Ignoring reply with cmd = %d", reply.get_cmd());
+            return NL_SKIP;
+        }
+
+        nlattr *vendor_data = reply.get_attribute(NL80211_ATTR_VENDOR_DATA);
+        int len = reply.get_vendor_data_len();
+
+        if (vendor_data == NULL || len == 0) {
+            ALOGE("no vendor data in DscpCommand response; ignoring it");
+            return NL_SKIP;
+        }
+        if( mReqType == SET_DSCP_TABLE) {
+            ALOGD("Response recieved for Set DSCP command\n");
+        } else if (mReqType == RESET_DSCP_TABLE) {
+            ALOGD("Response recieved for Reset DSCP command\n");
+        }
+        return NL_OK;
+    }
+
+    int handleEvent(WifiEvent& event) {
+        /* No Event to recieve for DSCP commands */
+        ALOGD("DSCP command %s\n", __FUNCTION__);
+        return NL_SKIP;
+    }
+};
+
+wifi_error wifi_map_dscp_access_category(wifi_handle handle,
+        u32 start, u32 end, u32 ac)
+{
+    int numIfaceHandles = 0;
+    wifi_interface_handle *ifaceHandles = NULL;
+    wifi_interface_handle wlan0Handle;
+
+    wlan0Handle = wifi_get_wlan_interface((wifi_handle)handle, ifaceHandles, numIfaceHandles);
+
+    DscpCommand *cmd = new DscpCommand(wlan0Handle, start, end, ac);
+    NULL_CHECK_RETURN(cmd, "memory allocation failure", WIFI_ERROR_OUT_OF_MEMORY);
+    wifi_error result = (wifi_error)cmd->start();
+    if (result == WIFI_SUCCESS) {
+        ALOGI("Mapping DSCP table success\n");
+    } else {
+        ALOGE("Mapping DSCP table fail\n");
+    }
+    cmd->releaseRef();
+    return result;
+}
+
+wifi_error wifi_reset_dscp_mapping(wifi_handle handle)
+{
+    int numIfaceHandles = 0;
+    wifi_interface_handle *ifaceHandles = NULL;
+    wifi_interface_handle wlan0Handle;
+
+    wlan0Handle = wifi_get_wlan_interface((wifi_handle)handle, ifaceHandles, numIfaceHandles);
+
+    DscpCommand *cmd = new DscpCommand(wlan0Handle);
+    NULL_CHECK_RETURN(cmd, "memory allocation failure", WIFI_ERROR_OUT_OF_MEMORY);
+    wifi_error result = (wifi_error)cmd->start();
+    if (result == WIFI_SUCCESS) {
+        ALOGI("Resetting DSCP table success\n");
+    } else {
+        ALOGE("Resetting DSCP table fail\n");
+    }
+    cmd->releaseRef();
+    return result;
 }
 
 /////////////////////////////////////////////////////////////////////////////
