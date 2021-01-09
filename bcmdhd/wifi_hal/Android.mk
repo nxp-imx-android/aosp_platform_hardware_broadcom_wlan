@@ -41,6 +41,9 @@ LOCAL_C_INCLUDES += \
 
 LOCAL_HEADER_LIBRARIES := libutils_headers liblog_headers
 
+LOCAL_SHARED_LIBRARIES += \
+	google_wifi_firmware_config_version_c_wrapper
+
 LOCAL_SRC_FILES := \
 	wifi_hal.cpp \
 	rtt.cpp \
@@ -50,7 +53,8 @@ LOCAL_SRC_FILES := \
 	nan.cpp \
 	link_layer_stats.cpp \
 	wifi_logger.cpp \
-	wifi_offload.cpp
+	wifi_offload.cpp \
+	twt.cpp
 
 LOCAL_MODULE := libwifi-hal-bcm
 LOCAL_PROPRIETARY_MODULE := true
