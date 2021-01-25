@@ -65,7 +65,7 @@
 
 #define WIFI_HAL_CMD_SOCK_PORT       644
 #define WIFI_HAL_EVENT_SOCK_PORT     645
-#define MAX_VIRTUAL_IFACES           4
+#define MAX_VIRTUAL_IFACES           5
 
 /*
  * Defines for wifi_wait_for_driver_ready()
@@ -316,6 +316,7 @@ wifi_error init_wifi_vendor_hal_func_table(wifi_hal_fn *fn)
 
     return WIFI_SUCCESS;
 }
+#ifdef GOOGLE_WIFI_FW_CONFIG_VERSION_C_WRAPPER
 #include <google_wifi_firmware_config_version_info.h>
 
 static void
@@ -338,6 +339,7 @@ wifi_check_valid_ota_version(wifi_interface_handle handle)
         ALOGE("Do not valid config files of OTA.");
     }
 }
+#endif // GOOGLE_WIFI_FW_CONFIG_VERSION_C_WRAPPER
 
 hal_info *halInfo = NULL;
 wifi_error wifi_pre_initialize(void)
@@ -464,7 +466,9 @@ wifi_error wifi_pre_initialize(void)
     if (wlan0Handle != NULL) {
         ALOGE("Calling preInit");
         if (!get_halutil_mode()) {
+#ifdef GOOGLE_WIFI_FW_CONFIG_VERSION_C_WRAPPER
             (void) wifi_check_valid_ota_version(wlan0Handle);
+#endif // GOOGLE_WIFI_FW_CONFIG_VERSION_C_WRAPPER
             result = wifi_hal_preInit(wlan0Handle);
             if (result != WIFI_SUCCESS) {
                 ALOGE("wifi_hal_preInit failed");
@@ -1651,6 +1655,11 @@ wifi_error wifi_clear_iface_hal_info(wifi_handle handle, const char* ifname)
             break;
         }
         i++;
+    }
+    if (i < info->num_interfaces) {
+        for (int j = i; j < info->num_interfaces; j++) {
+            info->interfaces[j] = info->interfaces[j+1];
+        }
     }
     return WIFI_SUCCESS;
 }
